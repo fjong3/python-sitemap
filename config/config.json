@@ -1,13 +1,39 @@
 {
-	"domain":"http://blog.lesite.us",
+	"domain":"https://www.bayareaolderadults.org/test/",
 	"skipext":	[
-					"pdf",
 					"xml"
 				],
 	"parserobots":false,
-	"debug":true,
+	"debug":false,
 	"output":"sitemap.xml",
 	"exclude":	[
-				"action=edit"
-				]
+				"action=edit",
+				"login",
+				"home",
+				"comment",
+				"images/adcampaign",
+				"images/ads",
+				"images/auction-items",
+				"images/buttons",
+				"images/menu",
+				"images/misc",
+				"images/featured_activity",
+				"images/paypal",
+				"images/supersleight",
+				"images/events",
+				"images/day-trips",
+				"/actions",
+				"/admin",
+				"/cron",
+				"/css",
+				"/include",
+				"/js",
+				"/php",
+				"/utilities",
+				".htaccess"
+				],
+	"report":true,
+	"images":true,
+	"freq"	:true
 }
+

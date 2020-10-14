@@ -2,12 +2,11 @@ import asyncio
 import concurrent.futures
 import base64
 from copy import copy
-import math
 
 import config
 import logging
 from urllib.parse import urljoin, urlunparse, urlsplit, urlunsplit
-
+from collections import deque  
 import re
 from urllib.parse import urlparse
 from urllib.request import urlopen, Request
@@ -21,8 +20,6 @@ class IllegalArgumentError(ValueError):
 	pass
 
 class Crawler:
-
-	MAX_URLS_PER_SITEMAP = 50000
 
 	# Variables
 	parserobots = False
@@ -40,8 +37,9 @@ class Crawler:
 	auth = False
 
 	urls_to_crawl = set([])
-	url_strings_to_output = []
+	#urls_to_crawl = deque([])
 	crawled_or_crawling = set([])
+	images_found = set([])
 	excluded = set([])
 
 	marked = {}
@@ -65,7 +63,7 @@ class Crawler:
 
 	def __init__(self, num_workers=1, parserobots=False, output=None,
 				 report=False ,domain="", exclude=[], skipext=[], drop=[],
-				 debug=False, verbose=False, images=False, auth=False, as_index=False):
+				 debug=False, verbose=False, images=False, freq = False, auth=False):
 		self.num_workers = num_workers
 		self.parserobots = parserobots
 		self.output 	= output
@@ -77,8 +75,8 @@ class Crawler:
 		self.debug		= debug
 		self.verbose    = verbose
 		self.images     = images
-		self.auth       = auth
-		self.as_index   = as_index
+		self.freq 		= freq
+		self.auth = auth
 
 		if self.debug:
 			log_level = logging.DEBUG
@@ -88,9 +86,9 @@ class Crawler:
 			log_level = logging.ERROR
 
 		logging.basicConfig(level=log_level)
-
+		#self.urls_to_crawl.appendleft({self.clean_link(domain)})
 		self.urls_to_crawl = {self.clean_link(domain)}
-		self.url_strings_to_output = []
+		#print(type(self.urls_to_crawl)) debug
 		self.num_crawled = 0
 
 		if num_workers <= 0:
@@ -110,11 +108,10 @@ class Crawler:
 			except:
 				logging.error ("Output file not available.")
 				exit(255)
-		elif self.as_index:
-			logging.error("When specifying an index file as an output option, you must include an output file name")
-			exit(255)
 
 	def run(self):
+		print(config.xml_header, file=self.output_file)
+
 		if self.parserobots:
 			self.check_robots()
 
@@ -123,7 +120,7 @@ class Crawler:
 		if self.num_workers == 1:
 			while len(self.urls_to_crawl) != 0:
 				current_url = self.urls_to_crawl.pop()
-				self.crawled_or_crawling.add(current_url)
+				self.crawled_or_crawling.add(frozenset(current_url))
 				self.__crawl(current_url)
 		else:
 			event_loop = asyncio.get_event_loop()
@@ -136,8 +133,7 @@ class Crawler:
 
 		logging.info("Crawling has reached end of all found links")
 
-		self.write_sitemap_output()
-
+		print (config.xml_footer, file=self.output_file)
 
 
 	async def crawl_all_pending_urls(self, executor):
@@ -232,49 +228,15 @@ class Crawler:
 		if self.images:
 			# Search for images in the current page.
 			images = self.imageregex.findall(msg)
-			for image_link in list(set(images)):
+			for image_link in list(images):
 				image_link = image_link.decode("utf-8", errors="ignore")
-
-				# Ignore link starting with data:
-				if image_link.startswith("data:"):
-					continue
-
-				# If path start with // get the current url scheme
-				if image_link.startswith("//"):
-					image_link = url.scheme + ":" + image_link
-				# Append domain if not present
-				elif not image_link.startswith(("http", "https")):
-					if not image_link.startswith("/"):
-						image_link = "/{0}".format(image_link)
-					image_link = "{0}{1}".format(self.domain.strip("/"), image_link.replace("./", "/"))
-
-				# Ignore image if path is in the exclude_url list
-				if not self.exclude_url(image_link):
-					continue
-
-				# Ignore other domain images
-				image_link_parsed = urlparse(image_link)
-				if image_link_parsed.netloc != self.target_domain:
-					continue
-
-
-				# Test if images as been already seen and not present in the
-				# robot file
-				if self.can_fetch(image_link):
-					logging.debug("Found image : {0}".format(image_link))
-					image_list = "{0}<image:image><image:loc>{1}</image:loc></image:image>".format(image_list, self.htmlspecialchars(image_link))
-
-		# Last mod fetched ?
-		lastmod = ""
-		if date:
-			lastmod = "<lastmod>"+date.strftime('%Y-%m-%dT%H:%M:%S+00:00')+"</lastmod>"
-		url_string = "<url><loc>"+self.htmlspecialchars(url.geturl())+"</loc>" + lastmod + image_list + "</url>"
-		self.url_strings_to_output.append(url_string)
+				image_list = self.image_capture(url, image_link, image_list)
 
 		# Found links
 		links = self.linkregex.findall(msg)
 		for link in links:
 			link = link.decode("utf-8", errors="ignore")
+			link = link.replace(" ", "") 
 			logging.debug("Found : {0}".format(link))
 
 			if link.startswith('/'):
@@ -285,6 +247,9 @@ class Crawler:
 				continue
 			elif not link.startswith(('http', "https")):
 				link = self.clean_link(urljoin(current_url, link))
+				#if "home" in link:
+				#	link = link.replace("home","")
+				#	link = (current_url + link)
 
 			# Remove the anchor part if needed
 			if "#" in link:
@@ -307,11 +272,14 @@ class Crawler:
 				continue
 			if domain_link != self.target_domain:
 				continue
-            		if parsed_link.path in ["", "/"] and parsed_link.query == '':
+			if parsed_link.path in ["", "/"]:
+				continue
+			if "/test" not in (parsed_link.path):
 				continue
 			if "javascript" in link:
 				continue
 			if self.is_image(parsed_link.path):
+				image_list = self.image_capture(url, link, image_list)
 				continue
 			if parsed_link.path.startswith("data:"):
 				continue
@@ -337,75 +305,27 @@ class Crawler:
 				self.nb_exclude+=1
 				continue
 
-			self.urls_to_crawl.add(link)
+			self.urls_to_crawl.add(link) # set implementation4
+			#print(type(self.urls_to_crawl)) # debug
+			#self.urls_to_crawl.appendleft(link) # list implementation
 
-	def write_sitemap_output(self):
-		are_multiple_sitemap_files_required = \
-			len(self.url_strings_to_output) > self.MAX_URLS_PER_SITEMAP
+		# Last mod fetched ?
+		lastmod = ""
+		if date:
+			lastmod = "<lastmod>"+date.strftime('%Y-%m-%dT%H:%M:%S+00:00')+"</lastmod>"
 
-		# When there are more than 50,000 URLs, the sitemap specification says we have
-		# to split the sitemap into multiple files using an index file that points to the
-		# location of each sitemap file.  For now, we require the caller to explicitly
-		# specify they want to create an index, even if there are more than 50,000 URLs,
-		# to maintain backward compatibility.
-		#
-		# See specification here:
-		# https://support.google.com/webmasters/answer/183668?hl=en
-		if are_multiple_sitemap_files_required and self.as_index:
-			self.write_index_and_sitemap_files()
-		else:
-			self.write_single_sitemap()
+		# Change Frequency generated ?
+		changefreq = ""
+		if self.freq:
+			changefreq = "<changefreq>	</changefreq>" # generate frequency tag with default value monthly
 
-	def write_single_sitemap(self):
-		self.write_sitemap_file(self.output_file, self.url_strings_to_output)
+		# <changefreq>monthly</changefreq>
+		print ("<url><loc>"+self.htmlspecialchars(url.geturl())+"</loc>" + lastmod + changefreq + image_list + "</url>", file=self.output_file)
+		if self.output_file:
+			self.output_file.flush()
 
-	def write_index_and_sitemap_files(self):
-		sitemap_index_filename, sitemap_index_extension = os.path.splitext(self.output)
 
-		num_sitemap_files = math.ceil(len(self.url_strings_to_output) / self.MAX_URLS_PER_SITEMAP)
-		sitemap_filenames = []
-		for i in range(0, num_sitemap_files):
-			# name the individual sitemap files based on the name of the index file
-			sitemap_filename = sitemap_index_filename + '-' + str(i) + sitemap_index_extension
-			sitemap_filenames.append(sitemap_filename)
 
-		self.write_sitemap_index(sitemap_filenames)
-
-		for i, sitemap_filename in enumerate(sitemap_filenames):
-			self.write_subset_of_urls_to_sitemap(sitemap_filename, i * self.MAX_URLS_PER_SITEMAP)
-
-	def write_sitemap_index(self, sitemap_filenames):
-		sitemap_index_file = self.output_file
-		print(config.sitemapindex_header, file=sitemap_index_file)
-		for sitemap_filename in sitemap_filenames:
-			sitemap_url = urlunsplit([self.scheme, self.target_domain, sitemap_filename, '', ''])
-			print("<sitemap><loc>" + sitemap_url + "</loc>""</sitemap>", file=sitemap_index_file)
-		print(config.sitemapindex_footer, file=sitemap_index_file)
-
-	def write_subset_of_urls_to_sitemap(self, filename, index):
-		# Writes a maximum of self.MAX_URLS_PER_SITEMAP urls to a sitemap file
-		#
-		# filename: name of the file to write the sitemap to
-		# index:    zero-based index from which to start writing url strings contained in
-		#           self.url_strings_to_output
-		try:
-			with open(filename, 'w') as sitemap_file:
-				start_index = index
-				end_index = (index + self.MAX_URLS_PER_SITEMAP)
-				sitemap_url_strings = self.url_strings_to_output[start_index:end_index]
-				self.write_sitemap_file(sitemap_file, sitemap_url_strings)
-		except:
-			logging.error("Could not open sitemap file that is part of index.")
-			exit(255)
-
-	@staticmethod
-	def write_sitemap_file(file, url_strings):
-		print(config.xml_header, file=file)
-
-		for url_string in url_strings:
-			print (url_string, file=file)
-
-		print (config.xml_footer, file=file)
 
 	def clean_link(self, link):
 		parts = list(urlsplit(link))
@@ -429,6 +349,43 @@ class Crawler:
 	def is_image(path):
 		 mt,me = mimetypes.guess_type(path)
 		 return mt is not None and mt.startswith("image/")
+	
+	def image_capture(self, url, image_link, image_list):
+		# Ignore link starting with data:
+		if image_link.startswith("data:"):
+			return image_list
+
+		# If path start with // get the current url scheme
+		if image_link.startswith("//"):
+			image_link = url.scheme + ":" + image_link
+		# Append domain if not present
+		elif not image_link.startswith(("http", "https")):
+			if not image_link.startswith("/"):
+				image_link = "/{0}".format(image_link)
+			#image_link = "{0}{1}".format(self.domain.strip("/"), image_link.replace("./", "/"))
+			image_link = (urljoin(self.domain, image_link))
+		# Ignore image if path is in the exclude_url list
+		if not self.exclude_url(image_link):
+			return image_list
+
+		# Ignore other domain images
+		image_link_parsed = urlparse(image_link)
+		if image_link_parsed.netloc != self.target_domain:
+			return image_list
+		
+
+		# Test if images as been already seen and not present in the
+		# robot file
+		if image_link in self.images_found:
+			return image_list
+		
+		if self.can_fetch(image_link):
+			logging.debug("Found image : {0}".format(image_link))
+			image_list = "{0}<image:image><image:loc>{1}</image:loc></image:image>".format(image_list, self.htmlspecialchars(image_link))
+		
+		self.images_found.add(image_link)
+		return image_list
+
 
 	def exclude_link(self,link):
 		if link not in self.excluded:
