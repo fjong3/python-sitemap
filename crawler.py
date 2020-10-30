@@ -36,42 +36,49 @@ class Crawler:
 	debug	= False
 	auth = False
 
-	urls_to_crawl = set([])
-	#urls_to_crawl = deque([])
+	#urls_to_crawl = set([])
+	urls_to_crawl = deque([])
 	crawled_or_crawling = set([])
 	images_found = set([])
 	excluded = set([])
-
+	removed = set([])
+	reviews= set([]) #debug
+	content_maps  = set([]) #debug
 	marked = {}
 
 	not_parseable_resources = (".epub", ".mobi", ".docx", ".doc", ".opf", ".7z", ".ibooks", ".cbr", ".avi", ".mkv", ".mp4", ".jpg", ".jpeg", ".png", ".gif" ,".pdf", ".iso", ".rar", ".tar", ".tgz", ".zip", ".dmg", ".exe")
 
 	# TODO also search for window.location={.*?}
 	linkregex = re.compile(b'<a [^>]*href=[\'|"](.*?)[\'"][^>]*?>')
-	imageregex = re.compile (b'<img [^>]*src=[\'|"](.*?)[\'"].*?>')
+	imageregex = re.compile (b'<img [^>]*src=[\'|"](.*?)[\'"][^>]*?>')
+	commentregex = re.compile (b'<!--.*?-->', re.DOTALL)
 
 	rp = None
 	response_code={}
 	nb_url=1 # Number of url.
 	nb_rp=0 # Number of url blocked by the robots.txt
 	nb_exclude=0 # Number of url excluded by extension or word
+	nb_remove=0
 
 	output_file = None
-
+	report_file = "report.txt"
+	debug_file 	= "debug.txt"
 	target_domain = ""
+	must_include_path = ""
 	scheme		  = ""
 
 	def __init__(self, num_workers=1, parserobots=False, output=None,
-				 report=False ,domain="", exclude=[], skipext=[], drop=[],
+				 report=False ,domain="", exclude=[], remove=[], skipext=[], drop=[],
 				 debug=False, verbose=False, images=False, freq = False, auth=False):
 		self.num_workers = num_workers
 		self.parserobots = parserobots
 		self.output 	= output
 		self.report 	= report
 		self.domain 	= domain
+		self.remove		= self.attached_prefix(remove,self.domain)
 		self.exclude 	= exclude
 		self.skipext 	= skipext
-		self.drop		= drop
+		self.drop		= "".join(drop)
 		self.debug		= debug
 		self.verbose    = verbose
 		self.images     = images
@@ -86,8 +93,8 @@ class Crawler:
 			log_level = logging.ERROR
 
 		logging.basicConfig(level=log_level)
-		#self.urls_to_crawl.appendleft({self.clean_link(domain)})
-		self.urls_to_crawl = {self.clean_link(domain)}
+		self.urls_to_crawl.appendleft(self.clean_link(domain))
+		#self.urls_to_crawl = {self.clean_link(domain)}
 		#print(type(self.urls_to_crawl)) debug
 		self.num_crawled = 0
 
@@ -97,6 +104,7 @@ class Crawler:
 		try:
 			url_parsed = urlparse(domain)
 			self.target_domain = url_parsed.netloc
+			self.must_include_path = url_parsed.path
 			self.scheme = url_parsed.scheme
 		except:
 			logging.error("Invalide domain")
@@ -111,7 +119,6 @@ class Crawler:
 
 	def run(self):
 		print(config.xml_header, file=self.output_file)
-
 		if self.parserobots:
 			self.check_robots()
 
@@ -120,7 +127,7 @@ class Crawler:
 		if self.num_workers == 1:
 			while len(self.urls_to_crawl) != 0:
 				current_url = self.urls_to_crawl.pop()
-				self.crawled_or_crawling.add(frozenset(current_url))
+				self.crawled_or_crawling.add(current_url)
 				self.__crawl(current_url)
 		else:
 			event_loop = asyncio.get_event_loop()
@@ -134,6 +141,7 @@ class Crawler:
 		logging.info("Crawling has reached end of all found links")
 
 		print (config.xml_footer, file=self.output_file)
+		self.output_file.close()
 
 
 	async def crawl_all_pending_urls(self, executor):
@@ -160,7 +168,14 @@ class Crawler:
 
 
 	def __crawl(self, current_url):
+		if current_url.endswith('/'):
+					current_url = current_url[:-1]
 		url = urlparse(current_url)
+
+		# Debug for PDF Files
+		#if "pdf" in current_url:
+		#	with open("pdffile.txt", 'a') as f:
+		#		print(current_url, file=f)
 		logging.info("Crawling #{}: {}".format(self.num_crawled, url.geturl()))
 		self.num_crawled += 1
 
@@ -199,6 +214,11 @@ class Crawler:
 		if response is not None:
 			try:
 				msg = response.read()
+				# Remove all comments from the message
+				comments = self.commentregex.findall(msg)
+				for comment in comments:
+					msg = msg.replace(comment,("").encode("utf-8", errors="ignore"))
+
 				if response.getcode() in self.response_code:
 					self.response_code[response.getcode()]+=1
 				else:
@@ -238,12 +258,19 @@ class Crawler:
 			link = link.decode("utf-8", errors="ignore")
 			link = link.replace(" ", "") 
 			logging.debug("Found : {0}".format(link))
-
+			# Drop attributes if needed
+			if self.drop:
+				#link=re.sub(self.drop,'',link)
+				link_split = link.split("/")
+				if link_split[-1] == self.drop:
+					link = "/".join(link_split[:-1])
 			if link.startswith('/'):
 				link = url.scheme + '://' + url[1] + link
 			elif link.startswith('#'):
 				link = url.scheme + '://' + url[1] + url[2] + link
 			elif link.startswith(("mailto", "tel")):
+				continue
+			elif link == self.target_domain:
 				continue
 			elif not link.startswith(('http', "https")):
 				link = self.clean_link(urljoin(current_url, link))
@@ -255,9 +282,6 @@ class Crawler:
 			if "#" in link:
 				link = link[:link.index('#')]
 
-			# Drop attributes if needed
-			for toDrop in self.drop:
-				link=re.sub(toDrop,'',link)
 
 			# Parse the url to get domain and file extension
 			parsed_link = urlparse(link)
@@ -274,7 +298,7 @@ class Crawler:
 				continue
 			if parsed_link.path in ["", "/"]:
 				continue
-			if "/test" not in (parsed_link.path):
+			if self.must_include_path not in link:
 				continue
 			if "javascript" in link:
 				continue
@@ -283,7 +307,6 @@ class Crawler:
 				continue
 			if parsed_link.path.startswith("data:"):
 				continue
-
 			# Count one more URL
 			self.nb_url+=1
 
@@ -305,9 +328,20 @@ class Crawler:
 				self.nb_exclude+=1
 				continue
 
-			self.urls_to_crawl.add(link) # set implementation4
-			#print(type(self.urls_to_crawl)) # debug
-			#self.urls_to_crawl.appendleft(link) # list implementation
+
+			
+			if "review" in link:
+				self.reviews.add(link)
+			
+			if "content/maps" in link:
+				self.content_maps.add(link)
+			#self.urls_to_crawl.add(link) # set implementation4
+			#if ("fishing") in link:
+			#	with open (self.debug_file, 'a') as f:
+			#		print ("current url: " + current_url, file=f)
+			#		print("link: " + link, file=f)
+			#	f.close()
+			self.urls_to_crawl.appendleft(link) # deque implementation
 
 		# Last mod fetched ?
 		lastmod = ""
@@ -317,12 +351,18 @@ class Crawler:
 		# Change Frequency generated ?
 		changefreq = ""
 		if self.freq:
-			changefreq = "<changefreq>	</changefreq>" # generate frequency tag with default value monthly
+			changefreq = "<changefreq></changefreq>" # generate frequency tag with default value monthly
 
-		# <changefreq>monthly</changefreq>
+		# Check if the specific url is not to be included in the sitemap
+		if not self.remove_url(current_url):
+			self.remove_link(current_url)
+			self.nb_remove+=1
+			return
+
 		print ("<url><loc>"+self.htmlspecialchars(url.geturl())+"</loc>" + lastmod + changefreq + image_list + "</url>", file=self.output_file)
 		if self.output_file:
 			self.output_file.flush()
+
 
 
 
@@ -391,6 +431,10 @@ class Crawler:
 		if link not in self.excluded:
 			self.excluded.add(link)
 
+	def remove_link(self, link):
+		if link not in self.removed:
+			self.removed.add(link)
+
 	def check_robots(self):
 		robots_url = urljoin(self.domain, "robots.txt")
 		self.rp = RobotFileParser()
@@ -421,22 +465,57 @@ class Crawler:
 				return False
 		return True
 
+	def remove_url(self, link):
+		if link in self.remove:
+			return False
+		return True
+
 	@staticmethod
 	def htmlspecialchars(text):
 		return text.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 	def make_report(self):
-		print ("Number of found URL : {0}".format(self.nb_url))
-		print ("Number of links crawled : {0}".format(self.num_crawled))
-		if self.parserobots:
-			print ("Number of link block by robots.txt : {0}".format(self.nb_rp))
-		if self.skipext or self.exclude:
-			print ("Number of link exclude : {0}".format(self.nb_exclude))
+		with open(self.report_file, 'w') as f:
+			print ("Number of found URL : {0}".format(self.nb_url), file=f)
+			print ("Number of links crawled : {0}".format(self.num_crawled), file=f)
+			if self.parserobots:
+				print ("Number of link block by robots.txt : {0}".format(self.nb_rp), file=f)
+			if self.skipext or self.exclude:
+				print ("Number of link excluded : {0}".format(self.nb_exclude), file=f)
+			if self.exclude:
+				print ("Number of link removed : {0}".format(self.nb_remove), file=f)
+			for code in self.response_code:
+				print ("No Code HTTP {0} : {1}".format(code, self.response_code[code]), file=f)
+			for code in self.marked:
+				print ("Link with status {0}:".format(code), file=f)
+				for uri in self.marked[code]:
+					print ("\t- {0}".format(uri), file=f)
+			print("Link with content/maps", file=f)
+			for content in self.content_maps:
+				print ("\t- {0}".format(content), file=f)
+			print ("Link with /review:", file =f)
+			for review in self.reviews:
+				print("\t- {0}".format(review), file=f)
+			print ("Excluded link: ", file=f)
+			for item in self.excluded:
+				print ("\t- {0}".format(item), file=f)
+			print("Removed Link: ", file=f)
+			for url_remove in self.removed:
+				print ("\t- {0}".format(url_remove), file=f)
+			print ("Length of remove list: {0}".format(len(self.remove)), file=f)
+			print ("Difference between remove list and removed link", file=f)
+			for link in self.remove:
+				if link not in self.removed:
+					print ("\t- {0}".format(link), file=f)
+			f.close()
 
-		for code in self.response_code:
-			print ("Nb Code HTTP {0} : {1}".format(code, self.response_code[code]))
+	def attached_prefix (self, exclude, domain):
+		excludes = []
+		for line in exclude:
+			#if line[0] != "/":
+			#	excludes.append(domain + "/" + line)
+			#	continue
+			excludes.append(domain + line)
+		return excludes
 
-		for code in self.marked:
-			print ("Link with status {0}:".format(code))
-			for uri in self.marked[code]:
-				print ("\t- {0}".format(uri))
+
